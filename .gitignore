@@ -1,0 +1,20 @@
+# Build artifacts
+rio
+*.o
+*.a
+*.so
+
+# Planning docs
+PLAN.md
+
+# Editor/IDE files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.sublime-*
+
+# System files
+.DS_Store
+Thumbs.db
