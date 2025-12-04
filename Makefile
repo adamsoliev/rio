@@ -13,4 +13,7 @@ $(TARGET): $(SRC)
 clean:
 	rm -f $(TARGET)
 
-.PHONY: all clean
+run: $(TARGET)
+	./$(TARGET) --filename=/dev/ng0n1 --type=randomread --size=1g --iodepth=32 --bs=4k
+
+.PHONY: all clean run
