@@ -11,7 +11,7 @@
 #include <filesystem>
 #include <regex>
 #include <cstdlib>
-#include <ctime>
+#include <random>
 #include <chrono>
 #include <vector>
 #include <algorithm>
@@ -69,13 +69,13 @@ static size_t parse_size(const char *str)
 	{
 	case 'k':
 	case 'K':
-		return val * 1024;
+		return val * 1024ULL;
 	case 'm':
 	case 'M':
-		return val * 1024 * 1024;
+		return val * 1024ULL * 1024ULL;
 	case 'g':
 	case 'G':
-		return val * 1024 * 1024 * 1024;
+		return val * 1024ULL * 1024ULL * 1024ULL;
 	default:
 		std::cerr << "Invalid size suffix: " << end << std::endl;
 		exit(1);
@@ -311,12 +311,15 @@ static void *alloc_aligned_buffer(size_t size, size_t alignment)
 
 static uint64_t random_lba(uint64_t max_lba, uint64_t block_lbas)
 {
+	static thread_local std::mt19937_64 rng(std::random_device{}());
+
 	if (max_lba <= block_lbas)
 	{
 		return 0;
 	}
 	uint64_t max_start = max_lba - block_lbas;
-	return (uint64_t)rand() % (max_start + 1);
+	std::uniform_int_distribution<uint64_t> dist(0, max_start);
+	return dist(rng);
 }
 
 static void submit_read_direct(struct io_uring *ring, int fd, void *buf, size_t size, uint64_t offset, int buf_index)
@@ -426,6 +429,15 @@ int main(int argc, char **argv)
 	          << "  lba_size:   " << nvme.lba_size << " bytes\n"
 	          << "  nlba: " << nvme.nlba << "\n";
 
+	// Validate block size is a multiple of LBA size
+	if (cfg.block_size % nvme.lba_size != 0)
+	{
+		std::cerr << "Error: block size (" << cfg.block_size << ") must be a multiple of LBA size (" << nvme.lba_size
+		          << ")\n";
+		close(nvme.fd);
+		exit(1);
+	}
+
 	struct io_uring ring;
 	setup_io_uring(&ring, cfg.iodepth);
 
@@ -440,7 +452,6 @@ int main(int argc, char **argv)
 	// Calculate workload parameters
 	uint64_t total_ops = cfg.size / cfg.block_size;
 	uint64_t block_lbas = cfg.block_size / nvme.lba_size;
-	srand(time(NULL));
 
 	// Latency tracking
 	std::vector<double> latencies;
