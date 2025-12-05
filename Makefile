@@ -14,6 +14,6 @@ clean:
 	rm -f $(TARGET)
 
 run: $(TARGET)
-	./$(TARGET) --filename=/dev/ng0n1 --type=randomread --size=1g --iodepth=32 --bs=4k
+	sudo ./$(TARGET) --filename=/dev/nvme1n1 --type=randomread --size=1g --iodepth=32 --bs=4k
 
 .PHONY: all clean run
