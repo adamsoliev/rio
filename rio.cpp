@@ -2,6 +2,7 @@
 #include <iostream>
 #include <liburing.h>
 #include <libnvme.h>
+#include <linux/nvme_ioctl.h>
 #include <getopt.h>
 #include <string>
 #include <fcntl.h>
@@ -161,9 +162,14 @@ static Config parse_args(int argc, char **argv)
 	return cfg;
 }
 
-static void setup_io_uring(struct io_uring *ring, int queue_depth)
+static void setup_io_uring(struct io_uring *ring, int queue_depth, bool passthrough)
 {
-	int ret = io_uring_queue_init(queue_depth, ring, 0);
+	struct io_uring_params params = {};
+	if (passthrough)
+	{
+		params.flags = IORING_SETUP_SQE128 | IORING_SETUP_CQE32;
+	}
+	int ret = io_uring_queue_init_params(queue_depth, ring, &params);
 	if (ret < 0)
 	{
 		fatal_error("io_uring_queue_init failed", ret);
@@ -311,7 +317,7 @@ static void *alloc_aligned_buffer(size_t size, size_t alignment)
 
 static uint64_t random_lba(uint64_t max_lba, uint64_t block_lbas)
 {
-	static thread_local std::mt19937_64 rng(std::random_device{}());
+	static thread_local std::mt19937_64 rng(std::random_device {}());
 
 	if (max_lba <= block_lbas)
 	{
@@ -390,8 +396,8 @@ static void submit_read_passthrough(struct io_uring *ring, NVMeDevice *nvme, voi
 		fatal_error("Failed to get SQE");
 	}
 
-	// Prepare NVMe passthrough command
-	struct nvme_passthru_cmd cmd = {};
+	// Prepare NVMe uring command (different from nvme_passthru_cmd)
+	struct nvme_uring_cmd cmd = {};
 	cmd.opcode = nvme_cmd_read;
 	cmd.nsid = nvme->nsid;
 	cmd.addr = (uint64_t)buf;
@@ -400,7 +406,7 @@ static void submit_read_passthrough(struct io_uring *ring, NVMeDevice *nvme, voi
 	cmd.cdw11 = (uint32_t)(lba >> 32); // starting LBA upper 32 bits
 	cmd.cdw12 = blocks - 1;            // number of blocks (0-based)
 
-	// Use io_uring_prep_rw to setup IORING_OP_URING_CMD
+	// Setup IORING_OP_URING_CMD for NVMe passthrough
 	sqe->opcode = IORING_OP_URING_CMD;
 	sqe->fd = nvme->fd;
 	sqe->cmd_op = NVME_URING_CMD_IO;
@@ -412,22 +418,22 @@ int main(int argc, char **argv)
 {
 	Config cfg = parse_args(argc, argv);
 
-	std::cout << "Configuration:\n"
-	          << "  filename:   " << cfg.filename << "\n"
-	          << "  type:       " << cfg.type << "\n"
-	          << "  size:       " << cfg.size << " bytes\n"
-	          << "  iodepth:    " << cfg.iodepth << "\n"
-	          << "  block size: " << cfg.block_size << " bytes\n"
-	          << "  mode:       " << (cfg.passthrough ? "passthrough" : "direct") << "\n";
+	// std::cout << "Configuration:\n"
+	//           << "  filename:   " << cfg.filename << "\n"
+	//           << "  type:       " << cfg.type << "\n"
+	//           << "  size:       " << cfg.size << " bytes\n"
+	//           << "  iodepth:    " << cfg.iodepth << "\n"
+	//           << "  block size: " << cfg.block_size << " bytes\n"
+	//           << "  mode:       " << (cfg.passthrough ? "passthrough" : "direct") << "\n";
 
 	NVMeDevice nvme;
 	open_nvme_ssd(cfg.filename, cfg.passthrough, &nvme);
 
-	std::cout << "NVMeDevice:\n"
-	          << "  fd:  " << nvme.fd << "\n"
-	          << "  nsid:      " << nvme.nsid << "\n"
-	          << "  lba_size:   " << nvme.lba_size << " bytes\n"
-	          << "  nlba: " << nvme.nlba << "\n";
+	// std::cout << "NVMeDevice:\n"
+	//           << "  fd:  " << nvme.fd << "\n"
+	//           << "  nsid:      " << nvme.nsid << "\n"
+	//           << "  lba_size:   " << nvme.lba_size << " bytes\n"
+	//           << "  nlba: " << nvme.nlba << "\n";
 
 	// Validate block size is a multiple of LBA size
 	if (cfg.block_size % nvme.lba_size != 0)
@@ -439,7 +445,7 @@ int main(int argc, char **argv)
 	}
 
 	struct io_uring ring;
-	setup_io_uring(&ring, cfg.iodepth);
+	setup_io_uring(&ring, cfg.iodepth, cfg.passthrough);
 
 	// Allocate IO contexts (buffer + timing info)
 	IOContext *io_contexts = new IOContext[cfg.iodepth];
