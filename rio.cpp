@@ -162,7 +162,8 @@ static Config parse_args(int argc, char **argv)
 	return cfg;
 }
 
-static void setup_io_uring(struct io_uring *ring, int queue_depth, bool passthrough)
+static void setup_io_uring(struct io_uring *ring, int queue_depth, bool passthrough, int fd,
+                           std::vector<struct iovec> *buffers = nullptr)
 {
 	struct io_uring_params params = {};
 	if (passthrough)
@@ -173,6 +174,23 @@ static void setup_io_uring(struct io_uring *ring, int queue_depth, bool passthro
 	if (ret < 0)
 	{
 		fatal_error("io_uring_queue_init failed", ret);
+	}
+
+	// Register fixed file (eliminates file_get overhead)
+	ret = io_uring_register_files(ring, &fd, 1);
+	if (ret < 0)
+	{
+		fatal_error("io_uring_register_files failed", ret);
+	}
+
+	// Register fixed buffers if provided (eliminates page pinning overhead)
+	if (buffers && !buffers->empty())
+	{
+		ret = io_uring_register_buffers(ring, buffers->data(), buffers->size());
+		if (ret < 0)
+		{
+			fatal_error("io_uring_register_buffers failed", ret);
+		}
 	}
 }
 
@@ -328,14 +346,28 @@ static uint64_t random_lba(uint64_t max_lba, uint64_t block_lbas)
 	return dist(rng);
 }
 
-static void submit_read_direct(struct io_uring *ring, int fd, void *buf, size_t size, uint64_t offset, int buf_index)
+static void submit_read_direct(struct io_uring *ring, int fd, void *buf, size_t size, uint64_t offset, int buf_index,
+                               bool use_fixed_buffers)
 {
 	struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
 	if (!sqe)
 	{
 		fatal_error("Failed to get SQE");
 	}
-	io_uring_prep_read(sqe, fd, buf, size, offset);
+
+	if (use_fixed_buffers)
+	{
+		// Use fixed file (index 0) and fixed buffer (buf_index)
+		io_uring_prep_read_fixed(sqe, 0, buf, size, offset, buf_index);
+		sqe->flags |= IOSQE_FIXED_FILE;
+	}
+	else
+	{
+		// Use registered file (index 0) but non-fixed buffers
+		io_uring_prep_read(sqe, 0, buf, size, offset);
+		sqe->flags |= IOSQE_FIXED_FILE;
+	}
+
 	io_uring_sqe_set_data(sqe, (void *)(uintptr_t)buf_index);
 }
 
@@ -388,7 +420,7 @@ static void print_metrics(const std::vector<double> &latencies, double elapsed_s
 }
 
 static void submit_read_passthrough(struct io_uring *ring, NVMeDevice *nvme, void *buf, uint64_t lba, uint32_t blocks,
-                                    int buf_index)
+                                    int buf_index, bool use_fixed_buffers)
 {
 	struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
 	if (!sqe)
@@ -408,8 +440,15 @@ static void submit_read_passthrough(struct io_uring *ring, NVMeDevice *nvme, voi
 
 	// Setup IORING_OP_URING_CMD for NVMe passthrough
 	sqe->opcode = IORING_OP_URING_CMD;
-	sqe->fd = nvme->fd;
+	sqe->fd = 0; // Use registered file at index 0
 	sqe->cmd_op = NVME_URING_CMD_IO;
+	sqe->flags |= IOSQE_FIXED_FILE;
+
+	if (use_fixed_buffers)
+	{
+		sqe->buf_index = buf_index; // Use fixed buffer at this index
+	}
+
 	memcpy(sqe->cmd, &cmd, sizeof(cmd));
 	io_uring_sqe_set_data(sqe, (void *)(uintptr_t)buf_index);
 }
@@ -444,16 +483,21 @@ int main(int argc, char **argv)
 		exit(1);
 	}
 
-	struct io_uring ring;
-	setup_io_uring(&ring, cfg.iodepth, cfg.passthrough);
-
 	// Allocate IO contexts (buffer + timing info)
 	IOContext *io_contexts = new IOContext[cfg.iodepth];
 	size_t alignment = nvme.lba_size > 512 ? nvme.lba_size : 512;
+
+	// Prepare buffer registration for fixed buffers
+	std::vector<struct iovec> buffer_iovecs(cfg.iodepth);
 	for (int i = 0; i < cfg.iodepth; i++)
 	{
 		io_contexts[i].buffer = alloc_aligned_buffer(cfg.block_size, alignment);
+		buffer_iovecs[i].iov_base = io_contexts[i].buffer;
+		buffer_iovecs[i].iov_len = cfg.block_size;
 	}
+
+	struct io_uring ring;
+	setup_io_uring(&ring, cfg.iodepth, cfg.passthrough, nvme.fd, &buffer_iovecs);
 
 	// Calculate workload parameters
 	uint64_t total_ops = cfg.size / cfg.block_size;
@@ -481,12 +525,12 @@ int main(int argc, char **argv)
 
 		if (cfg.passthrough)
 		{
-			submit_read_passthrough(&ring, &nvme, io_contexts[buf_idx].buffer, lba, block_lbas, buf_idx);
+			submit_read_passthrough(&ring, &nvme, io_contexts[buf_idx].buffer, lba, block_lbas, buf_idx, true);
 		}
 		else
 		{
 			uint64_t offset = lba * nvme.lba_size;
-			submit_read_direct(&ring, nvme.fd, io_contexts[buf_idx].buffer, cfg.block_size, offset, buf_idx);
+			submit_read_direct(&ring, nvme.fd, io_contexts[buf_idx].buffer, cfg.block_size, offset, buf_idx, true);
 		}
 
 		submitted_ops++;
@@ -536,12 +580,12 @@ int main(int argc, char **argv)
 
 				if (cfg.passthrough)
 				{
-					submit_read_passthrough(&ring, &nvme, io_contexts[buf_idx].buffer, lba, block_lbas, buf_idx);
+					submit_read_passthrough(&ring, &nvme, io_contexts[buf_idx].buffer, lba, block_lbas, buf_idx, true);
 				}
 				else
 				{
 					uint64_t offset = lba * nvme.lba_size;
-					submit_read_direct(&ring, nvme.fd, io_contexts[buf_idx].buffer, cfg.block_size, offset, buf_idx);
+					submit_read_direct(&ring, nvme.fd, io_contexts[buf_idx].buffer, cfg.block_size, offset, buf_idx, true);
 				}
 
 				submitted_ops++;
