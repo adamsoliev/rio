@@ -96,7 +96,7 @@ static void usage(const char *prog)
 {
 	std::cerr << "Usage: " << prog << " [options]\n"
 	          << "  --filename=<path>   Target device or file\n"
-	          << "  --type=<type>       I/O pattern (randomread)\n"
+	          << "  --type=<type>       I/O pattern (randomread, randomwrite)\n"
 	          << "  --size=<size>       Total workload size (e.g., 1g, 512m)\n"
 	          << "  --runtime=<sec>     Run for specified seconds (alternative to --size)\n"
 	          << "  --iodepth=<num>     Queue depth\n"
@@ -197,9 +197,9 @@ static Config parse_args(int argc, char **argv)
 		usage(argv[0]);
 	}
 
-	if (strcmp(cfg.type, "randomread") != 0)
+	if (strcmp(cfg.type, "randomread") != 0 && strcmp(cfg.type, "randomwrite") != 0)
 	{
-		std::cerr << "Error: Only 'randomread' type is supported\n";
+		std::cerr << "Error: Only 'randomread' and 'randomwrite' types are supported\n";
 		exit(1);
 	}
 
@@ -388,6 +388,17 @@ static void submit_read_direct(struct io_uring *ring, int fd, void *buf, size_t 
 	io_uring_sqe_set_data(sqe, (void *)(uintptr_t)buf_index);
 }
 
+static void submit_write_direct(struct io_uring *ring, int fd, void *buf, size_t size, uint64_t offset, int buf_index)
+{
+	struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
+	if (!sqe)
+	{
+		fatal_error("Failed to get SQE");
+	}
+	io_uring_prep_write(sqe, fd, buf, size, offset);
+	io_uring_sqe_set_data(sqe, (void *)(uintptr_t)buf_index);
+}
+
 static double percentile(std::vector<double> &sorted_latencies, double p)
 {
 	if (sorted_latencies.empty())
@@ -463,6 +474,31 @@ static void submit_read_passthrough(struct io_uring *ring, NVMeDevice *nvme, voi
 	io_uring_sqe_set_data(sqe, (void *)(uintptr_t)buf_index);
 }
 
+static void submit_write_passthrough(struct io_uring *ring, NVMeDevice *nvme, void *buf, uint64_t lba, uint32_t blocks,
+                                     int buf_index)
+{
+	struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
+	if (!sqe)
+	{
+		fatal_error("Failed to get SQE");
+	}
+
+	struct nvme_uring_cmd cmd = {};
+	cmd.opcode = nvme_cmd_write;
+	cmd.nsid = nvme->nsid;
+	cmd.addr = (uint64_t)buf;
+	cmd.data_len = blocks * nvme->lba_size;
+	cmd.cdw10 = (uint32_t)lba;         // starting LBA lower 32 bits
+	cmd.cdw11 = (uint32_t)(lba >> 32); // starting LBA upper 32 bits
+	cmd.cdw12 = blocks - 1;            // number of blocks (0-based)
+
+	sqe->opcode = IORING_OP_URING_CMD;
+	sqe->fd = nvme->fd;
+	sqe->cmd_op = NVME_URING_CMD_IO;
+	memcpy(sqe->cmd, &cmd, sizeof(cmd));
+	io_uring_sqe_set_data(sqe, (void *)(uintptr_t)buf_index);
+}
+
 int main(int argc, char **argv)
 {
 	Config cfg = parse_args(argc, argv);
@@ -525,6 +561,8 @@ int main(int argc, char **argv)
 	// Record start time
 	TimePoint start_time = Clock::now();
 
+	bool is_write = (strcmp(cfg.type, "randomwrite") == 0);
+
 	// Fill queue with initial operations
 	while (submitted_ops < total_ops && in_flight < cfg.iodepth)
 	{
@@ -535,12 +573,18 @@ int main(int argc, char **argv)
 
 		if (cfg.passthrough)
 		{
-			submit_read_passthrough(&ring, &nvme, io_contexts[buf_idx].buffer, lba, block_lbas, buf_idx);
+			if (is_write)
+				submit_write_passthrough(&ring, &nvme, io_contexts[buf_idx].buffer, lba, block_lbas, buf_idx);
+			else
+				submit_read_passthrough(&ring, &nvme, io_contexts[buf_idx].buffer, lba, block_lbas, buf_idx);
 		}
 		else
 		{
 			uint64_t offset = lba * nvme.lba_size;
-			submit_read_direct(&ring, nvme.fd, io_contexts[buf_idx].buffer, cfg.block_size, offset, buf_idx);
+			if (is_write)
+				submit_write_direct(&ring, nvme.fd, io_contexts[buf_idx].buffer, cfg.block_size, offset, buf_idx);
+			else
+				submit_read_direct(&ring, nvme.fd, io_contexts[buf_idx].buffer, cfg.block_size, offset, buf_idx);
 		}
 
 		submitted_ops++;
@@ -626,12 +670,18 @@ int main(int argc, char **argv)
 
 				if (cfg.passthrough)
 				{
-					submit_read_passthrough(&ring, &nvme, io_contexts[buf_idx].buffer, lba, block_lbas, buf_idx);
+					if (is_write)
+						submit_write_passthrough(&ring, &nvme, io_contexts[buf_idx].buffer, lba, block_lbas, buf_idx);
+					else
+						submit_read_passthrough(&ring, &nvme, io_contexts[buf_idx].buffer, lba, block_lbas, buf_idx);
 				}
 				else
 				{
 					uint64_t offset = lba * nvme.lba_size;
-					submit_read_direct(&ring, nvme.fd, io_contexts[buf_idx].buffer, cfg.block_size, offset, buf_idx);
+					if (is_write)
+						submit_write_direct(&ring, nvme.fd, io_contexts[buf_idx].buffer, cfg.block_size, offset, buf_idx);
+					else
+						submit_read_direct(&ring, nvme.fd, io_contexts[buf_idx].buffer, cfg.block_size, offset, buf_idx);
 				}
 
 				submitted_ops++;

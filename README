@@ -16,7 +16,7 @@ PARAMETERS
 ----------
 
 --filename  : Target device or file path (e.g., /dev/nvme0n1)
---type      : I/O pattern type (currently supports: randomread)
+--type      : I/O pattern type (randomread, randomwrite)
 --size      : Total size of I/O workload (e.g., 1g, 512m, 2048k)
 --runtime   : Run for specified seconds (alternative to --size)
 --iodepth   : Queue depth, number of concurrent I/O operations in flight
@@ -49,16 +49,14 @@ v0.1
   - Three submission modes: submit_and_wait, submit, sqpoll
   - Time-based workloads with --runtime option
 
-  Sample results (nvme0n1, 10g, bs=4k):
+  Sample results (nvme0n1, 10g, bs=4k, submit_and_wait):
 
-    iodepth=32
-    Mode             IOPS      BW (MB/s)   p99 (us)   max (us)
-    submit_and_wait  288,047   1125        151        538
-    submit           285,644   1116        155        486
-    sqpoll           283,933   1109        151        503
+    randomread
+    iodepth   IOPS      BW (MB/s)   p99 (us)   max (us)
+    32        288,047   1125        151        538
+    128       352,433   1377        424        1003
 
-    iodepth=128
-    Mode             IOPS      BW (MB/s)   p99 (us)   max (us)
-    submit_and_wait  352,433   1377        424        1003
-    submit           347,221   1356        433        863
-    sqpoll           351,550   1373        420        701
+    randomwrite
+    iodepth   IOPS      BW (MB/s)   p99 (us)   max (us)
+    32        165,239   645         316        1023
+    128       160,068   625         1125       1815
