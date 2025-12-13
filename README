@@ -18,8 +18,14 @@ PARAMETERS
 --filename  : Target device or file path (e.g., /dev/nvme0n1)
 --type      : I/O pattern type (currently supports: randomread)
 --size      : Total size of I/O workload (e.g., 1g, 512m, 2048k)
+--runtime   : Run for specified seconds (alternative to --size)
 --iodepth   : Queue depth, number of concurrent I/O operations in flight
 --bs        : Block size for each I/O operation (e.g., 4k, 8k, 128k)
+--mode      : I/O mode (direct, passthrough)
+--submit    : io_uring submission mode:
+                submit_and_wait - single syscall for submit + wait (default)
+                submit          - separate submit and wait syscalls
+                sqpoll          - kernel thread polls SQ (IORING_SETUP_SQPOLL)
 
 
 OUTPUT
@@ -40,3 +46,19 @@ v0.1
   - Random read workload pattern
   - io_uring-based I/O submission and completion
   - Basic performance metrics reporting
+  - Three submission modes: submit_and_wait, submit, sqpoll
+  - Time-based workloads with --runtime option
+
+  Sample results (nvme0n1, 10g, bs=4k):
+
+    iodepth=32
+    Mode             IOPS      BW (MB/s)   p99 (us)   max (us)
+    submit_and_wait  288,047   1125        151        538
+    submit           285,644   1116        155        486
+    sqpoll           283,933   1109        151        503
+
+    iodepth=128
+    Mode             IOPS      BW (MB/s)   p99 (us)   max (us)
+    submit_and_wait  352,433   1377        424        1003
+    submit           347,221   1356        433        863
+    sqpoll           351,550   1373        420        701

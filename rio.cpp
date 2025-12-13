@@ -43,6 +43,7 @@ struct Config
 	const char *filename = nullptr;
 	const char *type = nullptr;
 	size_t size = 0;
+	int runtime = 0; // seconds, 0 means use size instead
 	int iodepth = 0;
 	size_t block_size = 0;
 	bool passthrough = false;                      // O_DIRECT by default
@@ -97,6 +98,7 @@ static void usage(const char *prog)
 	          << "  --filename=<path>   Target device or file\n"
 	          << "  --type=<type>       I/O pattern (randomread)\n"
 	          << "  --size=<size>       Total workload size (e.g., 1g, 512m)\n"
+	          << "  --runtime=<sec>     Run for specified seconds (alternative to --size)\n"
 	          << "  --iodepth=<num>     Queue depth\n"
 	          << "  --bs=<size>         Block size (e.g., 4k)\n"
 	          << "  --mode=<mode>       I/O mode: direct (default), passthrough\n"
@@ -114,6 +116,7 @@ static Config parse_args(int argc, char **argv)
 	static struct option long_options[] = {{"filename", required_argument, 0, 'f'},
 	                                       {"type", required_argument, 0, 't'},
 	                                       {"size", required_argument, 0, 's'},
+	                                       {"runtime", required_argument, 0, 'r'},
 	                                       {"iodepth", required_argument, 0, 'd'},
 	                                       {"bs", required_argument, 0, 'b'},
 	                                       {"mode", required_argument, 0, 'm'},
@@ -133,6 +136,9 @@ static Config parse_args(int argc, char **argv)
 			break;
 		case 's':
 			cfg.size = parse_size(optarg);
+			break;
+		case 'r':
+			cfg.runtime = atoi(optarg);
 			break;
 		case 'd':
 			cfg.iodepth = atoi(optarg);
@@ -179,9 +185,15 @@ static Config parse_args(int argc, char **argv)
 		}
 	}
 
-	if (!cfg.filename || !cfg.type || cfg.size == 0 || cfg.iodepth == 0 || cfg.block_size == 0)
+	if (!cfg.filename || !cfg.type || cfg.iodepth == 0 || cfg.block_size == 0)
 	{
-		std::cerr << "Error: All parameters are required\n";
+		std::cerr << "Error: Required parameters missing\n";
+		usage(argv[0]);
+	}
+
+	if (cfg.size == 0 && cfg.runtime == 0)
+	{
+		std::cerr << "Error: Either --size or --runtime is required\n";
 		usage(argv[0]);
 	}
 
@@ -493,12 +505,17 @@ int main(int argc, char **argv)
 	}
 
 	// Calculate workload parameters
-	uint64_t total_ops = cfg.size / cfg.block_size;
 	uint64_t block_lbas = cfg.block_size / nvme.lba_size;
+	bool time_based = (cfg.runtime > 0);
+	uint64_t total_ops = time_based ? UINT64_MAX : cfg.size / cfg.block_size;
+	TimePoint deadline = time_based ? Clock::now() + std::chrono::seconds(cfg.runtime) : TimePoint{};
 
 	// Latency tracking
 	std::vector<double> latencies;
-	latencies.reserve(total_ops);
+	if (!time_based)
+	{
+		latencies.reserve(total_ops);
+	}
 
 	// Track progress
 	uint64_t submitted_ops = 0;
@@ -540,7 +557,8 @@ int main(int argc, char **argv)
 	}
 
 	// Main workload loop
-	while (completed_ops < total_ops)
+	// For time-based: run until deadline, then drain in-flight ops
+	while (in_flight > 0 || (!time_based && completed_ops < total_ops))
 	{
 		struct io_uring_cqe *cqe;
 		int ret;
@@ -598,8 +616,9 @@ int main(int argc, char **argv)
 			in_flight--;
 			count++;
 
-			// Resubmit if more work to do
-			if (submitted_ops < total_ops)
+			// Resubmit if more work to do (check deadline for time-based mode)
+			bool should_submit = time_based ? (Clock::now() < deadline) : (submitted_ops < total_ops);
+			if (should_submit)
 			{
 				uint64_t lba = random_lba(nvme.nlba, block_lbas);
 
