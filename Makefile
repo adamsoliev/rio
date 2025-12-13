@@ -17,4 +17,11 @@ clean:
 run: $(TARGET)
 	sudo ./$(TARGET) --filename=/dev/nvme1n1 --type=randomread --size=1g --iodepth=32 --bs=4k --mode=passthrough
 
-.PHONY: all clean run
+threads: $(TARGET)
+	@echo "=== submit mode (no SQPOLL) ==="
+	@sudo bash -c './$(TARGET) --filename=/dev/nvme0n1 --type=randomread --size=10g --iodepth=128 --bs=4k --submit=submit & sleep 1; ps -eLo pid,tid,comm | grep $$!; kill $$!'
+	@echo ""
+	@echo "=== sqpoll mode ==="
+	@sudo bash -c './$(TARGET) --filename=/dev/nvme0n1 --type=randomread --size=10g --iodepth=128 --bs=4k --submit=sqpoll & sleep 1; ps -eLo pid,tid,comm | grep $$!; kill $$!'
+
+.PHONY: all clean run threads

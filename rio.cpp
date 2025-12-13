@@ -31,6 +31,13 @@ static void fatal_error(const char *msg, int err = 0)
 	std::exit(1);
 }
 
+enum class SubmitMode
+{
+	SUBMIT_AND_WAIT, // io_uring_submit_and_wait(): submit + block until CQEs ready
+	SUBMIT,          // io_uring_submit() + io_uring_wait_cqe(): separate submit and wait
+	SQPOLL,          // kernel thread polls SQ, no submit syscall needed
+};
+
 struct Config
 {
 	const char *filename = nullptr;
@@ -38,7 +45,8 @@ struct Config
 	size_t size = 0;
 	int iodepth = 0;
 	size_t block_size = 0;
-	bool passthrough = false; // O_DIRECT by default
+	bool passthrough = false;                      // O_DIRECT by default
+	SubmitMode submit_mode = SubmitMode::SUBMIT_AND_WAIT;
 };
 
 struct NVMeDevice
@@ -86,12 +94,16 @@ static size_t parse_size(const char *str)
 static void usage(const char *prog)
 {
 	std::cerr << "Usage: " << prog << " [options]\n"
-	          << "  --filename=<path>  Target device or file\n"
-	          << "  --type=<type>      I/O pattern (randomread)\n"
-	          << "  --size=<size>      Total workload size (e.g., 1g, 512m)\n"
-	          << "  --iodepth=<num>    Queue depth\n"
-	          << "  --bs=<size>        Block size (e.g., 4k)\n"
-	          << "  --mode=<mode>      I/O mode: direct (default), passthrough\n";
+	          << "  --filename=<path>   Target device or file\n"
+	          << "  --type=<type>       I/O pattern (randomread)\n"
+	          << "  --size=<size>       Total workload size (e.g., 1g, 512m)\n"
+	          << "  --iodepth=<num>     Queue depth\n"
+	          << "  --bs=<size>         Block size (e.g., 4k)\n"
+	          << "  --mode=<mode>       I/O mode: direct (default), passthrough\n"
+	          << "  --submit=<mode>     Submission mode:\n"
+	          << "                        submit_and_wait - submit + block (default)\n"
+	          << "                        submit          - separate submit and wait calls\n"
+	          << "                        sqpoll          - kernel thread polls SQ\n";
 	exit(1);
 }
 
@@ -105,6 +117,7 @@ static Config parse_args(int argc, char **argv)
 	                                       {"iodepth", required_argument, 0, 'd'},
 	                                       {"bs", required_argument, 0, 'b'},
 	                                       {"mode", required_argument, 0, 'm'},
+	                                       {"submit", required_argument, 0, 'u'},
 	                                       {0, 0, 0, 0}};
 
 	int opt;
@@ -142,6 +155,25 @@ static Config parse_args(int argc, char **argv)
 				usage(argv[0]);
 			}
 			break;
+		case 'u':
+			if (strcmp(optarg, "submit_and_wait") == 0)
+			{
+				cfg.submit_mode = SubmitMode::SUBMIT_AND_WAIT;
+			}
+			else if (strcmp(optarg, "submit") == 0)
+			{
+				cfg.submit_mode = SubmitMode::SUBMIT;
+			}
+			else if (strcmp(optarg, "sqpoll") == 0)
+			{
+				cfg.submit_mode = SubmitMode::SQPOLL;
+			}
+			else
+			{
+				std::cerr << "Invalid submit mode: " << optarg << std::endl;
+				usage(argv[0]);
+			}
+			break;
 		default:
 			usage(argv[0]);
 		}
@@ -162,12 +194,17 @@ static Config parse_args(int argc, char **argv)
 	return cfg;
 }
 
-static void setup_io_uring(struct io_uring *ring, int queue_depth, bool passthrough)
+static void setup_io_uring(struct io_uring *ring, int queue_depth, bool passthrough, SubmitMode submit_mode)
 {
 	struct io_uring_params params = {};
 	if (passthrough)
 	{
 		params.flags = IORING_SETUP_SQE128 | IORING_SETUP_CQE32;
+	}
+	if (submit_mode == SubmitMode::SQPOLL)
+	{
+		params.flags |= IORING_SETUP_SQPOLL;
+		params.sq_thread_idle = 2000; // ms before kernel thread goes idle
 	}
 	int ret = io_uring_queue_init_params(queue_depth, ring, &params);
 	if (ret < 0)
@@ -445,7 +482,7 @@ int main(int argc, char **argv)
 	}
 
 	struct io_uring ring;
-	setup_io_uring(&ring, cfg.iodepth, cfg.passthrough);
+	setup_io_uring(&ring, cfg.iodepth, cfg.passthrough, cfg.submit_mode);
 
 	// Allocate IO contexts (buffer + timing info)
 	IOContext *io_contexts = new IOContext[cfg.iodepth];
@@ -493,17 +530,51 @@ int main(int argc, char **argv)
 		in_flight++;
 	}
 
+	// Submit initial batch (in SQPOLL mode, flushes SQ tail for kernel thread)
+	{
+		int ret = io_uring_submit(&ring);
+		if (ret < 0)
+		{
+			fatal_error("io_uring_submit failed", ret);
+		}
+	}
+
 	// Main workload loop
 	while (completed_ops < total_ops)
 	{
-		int ret = io_uring_submit_and_wait(&ring, 1);
+		struct io_uring_cqe *cqe;
+		int ret;
+
+		switch (cfg.submit_mode)
+		{
+		case SubmitMode::SUBMIT_AND_WAIT:
+			// Single syscall: submit pending SQEs and wait for completion
+			ret = io_uring_submit_and_wait(&ring, 1);
+			break;
+
+		case SubmitMode::SUBMIT:
+			// Two syscalls: submit first, then wait separately
+			ret = io_uring_submit(&ring);
+			if (ret < 0)
+			{
+				fatal_error("io_uring_submit failed", ret);
+			}
+			ret = io_uring_wait_cqe(&ring, &cqe);
+			break;
+
+		case SubmitMode::SQPOLL:
+			// Flush SQ tail and wake kernel thread if idle; no actual submit syscall
+			io_uring_submit(&ring);
+			ret = io_uring_wait_cqe(&ring, &cqe);
+			break;
+		}
+
 		if (ret < 0)
 		{
-			fatal_error("io_uring_submit_and_wait failed", ret);
+			fatal_error("io_uring wait failed", ret);
 		}
 
 		// Process completions
-		struct io_uring_cqe *cqe;
 		unsigned head;
 		unsigned count = 0;
 
