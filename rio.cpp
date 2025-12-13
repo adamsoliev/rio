@@ -96,7 +96,7 @@ static void usage(const char *prog)
 {
 	std::cerr << "Usage: " << prog << " [options]\n"
 	          << "  --filename=<path>   Target device or file\n"
-	          << "  --type=<type>       I/O pattern (randomread, randomwrite)\n"
+	          << "  --type=<type>       I/O pattern (randread, randwrite)\n"
 	          << "  --size=<size>       Total workload size (e.g., 1g, 512m)\n"
 	          << "  --runtime=<sec>     Run for specified seconds (alternative to --size)\n"
 	          << "  --iodepth=<num>     Queue depth\n"
@@ -197,9 +197,9 @@ static Config parse_args(int argc, char **argv)
 		usage(argv[0]);
 	}
 
-	if (strcmp(cfg.type, "randomread") != 0 && strcmp(cfg.type, "randomwrite") != 0)
+	if (strcmp(cfg.type, "randread") != 0 && strcmp(cfg.type, "randwrite") != 0)
 	{
-		std::cerr << "Error: Only 'randomread' and 'randomwrite' types are supported\n";
+		std::cerr << "Error: Only 'randread' and 'randwrite' types are supported\n";
 		exit(1);
 	}
 
@@ -561,7 +561,7 @@ int main(int argc, char **argv)
 	// Record start time
 	TimePoint start_time = Clock::now();
 
-	bool is_write = (strcmp(cfg.type, "randomwrite") == 0);
+	bool is_write = (strcmp(cfg.type, "randwrite") == 0);
 
 	// Fill queue with initial operations
 	while (submitted_ops < total_ops && in_flight < cfg.iodepth)
