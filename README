@@ -1,9 +1,8 @@
-RIO - Rigid I/O
----------------
+RIO - Rigid I/O Tester
+----------------------
 
 A command line utility for benchmarking modern SSDs using Linux io_uring.
-RIO executes I/O workloads and reports performance metrics including IOPS,
-latency, and throughput.
+It reports IOPS, latency, and throughput.
 
 
 USAGE
@@ -34,7 +33,7 @@ OUTPUT
 RIO reports the following metrics after completing the workload:
 
 - IOPS: I/O operations per second
-- Latency: Average, P50, P95, P99 latencies in microseconds
+- Latency: Avg, P50, P95, P99 latencies in microseconds
 - Throughput: Bandwidth in MB/s
 
 
