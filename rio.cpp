@@ -47,6 +47,7 @@ struct Config
 	int iodepth = 0;
 	size_t block_size = 0;
 	bool passthrough = false; // O_DIRECT by default
+	bool iopoll = false;      // Use IORING_SETUP_IOPOLL for polled completions
 	SubmitMode submit_mode = SubmitMode::SUBMIT_AND_WAIT;
 };
 
@@ -105,7 +106,8 @@ static void usage(const char *prog)
 	          << "  --submit=<mode>     Submission mode:\n"
 	          << "                        submit_and_wait - submit + block (default)\n"
 	          << "                        submit          - separate submit and wait calls\n"
-	          << "                        sqpoll          - kernel thread polls SQ\n";
+	          << "                        sqpoll          - kernel thread polls SQ\n"
+	          << "  --iopoll            Enable polled completions (requires poll queue support)\n";
 	exit(1);
 }
 
@@ -121,6 +123,7 @@ static Config parse_args(int argc, char **argv)
 	                                       {"bs", required_argument, 0, 'b'},
 	                                       {"mode", required_argument, 0, 'm'},
 	                                       {"submit", required_argument, 0, 'u'},
+	                                       {"iopoll", no_argument, 0, 'p'},
 	                                       {0, 0, 0, 0}};
 
 	int opt;
@@ -180,6 +183,9 @@ static Config parse_args(int argc, char **argv)
 				usage(argv[0]);
 			}
 			break;
+		case 'p':
+			cfg.iopoll = true;
+			break;
 		default:
 			usage(argv[0]);
 		}
@@ -206,22 +212,32 @@ static Config parse_args(int argc, char **argv)
 	return cfg;
 }
 
-static void setup_io_uring(struct io_uring *ring, int queue_depth, bool passthrough, SubmitMode submit_mode)
+static void setup_io_uring(struct io_uring *ring, int queue_depth, bool passthrough, SubmitMode submit_mode,
+                           bool iopoll)
 {
 	struct io_uring_params params = {};
 	if (passthrough)
 	{
 		params.flags = IORING_SETUP_SQE128 | IORING_SETUP_CQE32;
 	}
+	if (iopoll)
+	{
+		params.flags |= IORING_SETUP_IOPOLL;
+	}
 	if (submit_mode == SubmitMode::SQPOLL)
 	{
 		params.flags |= IORING_SETUP_SQPOLL | IORING_SETUP_SINGLE_ISSUER;
 		params.sq_thread_idle = 2000; // ms before kernel thread goes idle
 	}
-	else
+	else if (!iopoll)
 	{
 		// Defer completion work to io_uring_enter() for better batching
+		// Note: DEFER_TASKRUN is incompatible with IOPOLL
 		params.flags |= IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
+	}
+	else
+	{
+		params.flags |= IORING_SETUP_SINGLE_ISSUER;
 	}
 	int ret = io_uring_queue_init_params(queue_depth, ring, &params);
 	if (ret < 0)
@@ -541,7 +557,7 @@ int main(int argc, char **argv)
 	}
 
 	struct io_uring ring;
-	setup_io_uring(&ring, cfg.iodepth, cfg.passthrough, cfg.submit_mode);
+	setup_io_uring(&ring, cfg.iodepth, cfg.passthrough, cfg.submit_mode, cfg.iopoll);
 
 	// Register the file descriptor for fixed file access (avoids per-I/O fd lookup)
 	int ret = io_uring_register_files(&ring, &nvme.fd, 1);
