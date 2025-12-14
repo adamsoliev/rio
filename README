@@ -25,6 +25,9 @@ PARAMETERS
                 submit_and_wait - single syscall for submit + wait (default)
                 submit          - separate submit and wait syscalls
                 sqpoll          - kernel thread polls SQ (IORING_SETUP_SQPOLL)
+--iopoll    : Enable polled completions (IORING_SETUP_IOPOLL)
+                Polls NVMe completion queue directly instead of using interrupts.
+                Requires: nvme.poll_queues=N kernel parameter
 
 
 OUTPUT
