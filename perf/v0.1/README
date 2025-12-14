@@ -1,6 +1,0 @@
-Commands and params used to generate perf.data/flamegraph
-
-sudo perf record -g ./rio --filename=/dev/nvme1n1 --type=randomread --size=10g --iodepth=32 --bs=4k --mode=passthrough
-sudo perf script | /path-to/stackcollapse-perf.pl | /path-to/flamegraph.pl > graph.svg
-
-

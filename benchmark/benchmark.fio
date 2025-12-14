@@ -1,9 +1,0 @@
-[global]
-filename=/dev/nvme0n1
-bs=4k
-direct=1
-norandommap=1
-runtime=90
-group_reporting=1
-
-[job1]
