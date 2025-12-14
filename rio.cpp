@@ -215,8 +215,13 @@ static void setup_io_uring(struct io_uring *ring, int queue_depth, bool passthro
 	}
 	if (submit_mode == SubmitMode::SQPOLL)
 	{
-		params.flags |= IORING_SETUP_SQPOLL;
+		params.flags |= IORING_SETUP_SQPOLL | IORING_SETUP_SINGLE_ISSUER;
 		params.sq_thread_idle = 2000; // ms before kernel thread goes idle
+	}
+	else
+	{
+		// Defer completion work to io_uring_enter() for better batching
+		params.flags |= IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
 	}
 	int ret = io_uring_queue_init_params(queue_depth, ring, &params);
 	if (ret < 0)
