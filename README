@@ -5,6 +5,12 @@ A command line utility for benchmarking modern SSDs using Linux io_uring.
 It reports IOPS, latency, and throughput.
 
 
+DEPENDENCIES
+------------
+
+    sudo apt install liburing-dev libnvme-dev nvme-cli
+
+
 USAGE
 -----
 
